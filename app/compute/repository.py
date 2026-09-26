@@ -58,7 +58,20 @@ class ComputeRepository:
         )
         return dict(self.task_by_id(cursor.lastrowid))
 
-    def queued_candidate(self, capabilities: Iterable[str], now: str) -> sqlite3.Row | None:
+    def running_count(self, requested_by: str) -> int:
+        """统计用户当前真正占用运行名额的任务数。
+
+        cancel_requested 视为名额已释放（取消请求一旦受理即等待工作者终止，
+        不再阻止后续领取）；succeeded/failed/cancelled 以及回到 queued 的
+        重试与租约恢复任务自然不再计入。
+        """
+        return int(self.connection.execute(
+            "SELECT COUNT(*) FROM compute_tasks WHERE requested_by=? AND status='running'",
+            (requested_by,),
+        ).fetchone()[0])
+
+    def queued_candidates(self, capabilities: Iterable[str], now: str, limit: int = 500) -> list[sqlite3.Row]:
+        """按全局调度顺序返回可领取的排队任务，供领取事务逐个做配额核对。"""
         capability_list = sorted(set(capabilities))
         params: list[Any] = [now]
         condition = ""
@@ -66,10 +79,12 @@ class ComputeRepository:
             placeholders = ",".join("?" for _ in capability_list)
             condition = f" AND tpl.algorithm IN ({placeholders})"
             params.extend(capability_list)
-        return self.connection.execute(
-            "SELECT t.*,tpl.algorithm AS template_algorithm FROM compute_tasks t JOIN compute_templates tpl ON tpl.id=t.template_id WHERE t.status='queued' AND t.available_at<=?" + condition + " ORDER BY t.priority DESC,t.created_at ASC,t.id ASC LIMIT 1",
+        params.append(limit)
+        rows = self.connection.execute(
+            "SELECT t.*,tpl.algorithm AS template_algorithm FROM compute_tasks t JOIN compute_templates tpl ON tpl.id=t.template_id WHERE t.status='queued' AND t.available_at<=?" + condition + " ORDER BY t.priority DESC,t.created_at ASC,t.id ASC LIMIT ?",
             params,
-        ).fetchone()
+        ).fetchall()
+        return list(rows)
 
     def result_versions(self, task_id: int) -> list[dict[str, Any]]:
         return [dict(row) for row in self.connection.execute("SELECT * FROM compute_results WHERE task_id=? ORDER BY version", (task_id,)).fetchall()]
