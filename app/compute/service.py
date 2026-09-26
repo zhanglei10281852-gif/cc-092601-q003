@@ -86,6 +86,8 @@ class ComputeOperationsService:
         now_value = self.clock.now()
         now = to_storage(now_value)
         lease_until = to_storage(now_value + timedelta(seconds=lease_seconds))
+        # BEGIN IMMEDIATE 串行化并发领取；候选选择在事务内重新核对用户运行配额，
+        # 运行数已满的账号会被跳过而不是阻塞整条队列，条件更新兜底避免重复领取。
         with transaction(immediate=True) as connection:
             repository = ComputeRepository(connection)
             candidate = repository.queued_candidate(capabilities, now)
